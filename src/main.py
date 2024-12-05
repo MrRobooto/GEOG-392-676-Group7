@@ -7,9 +7,9 @@ import pandas as pd
 import os
 from shapely.geometry import Polygon
 import pickle
-from rasterio.enums import Resampling  # Add this import too
+from rasterio.enums import Resampling
 
-# Simple file paths - keep everything in the same folder as the script
+# File Paths
 DATA_FOLDER = r"C:\Users\gmay4\Desktop\392 Project Python\Data"
 OUTPUT_FOLDER = r"C:\Users\gmay4\Desktop\392 Project Output"
 
@@ -165,25 +165,68 @@ def compare_ndvi():
         # Load NDVI data
         with rasterio.open(os.path.join(DATA_FOLDER, "NDVI_2021.tif")) as src:
             ndvi_2021 = src.read(1)
+            transform = src.transform
+            crs = src.crs
         with rasterio.open(os.path.join(DATA_FOLDER, "NDVI_2023.tif")) as src:
             ndvi_2023 = src.read(1)
-            
-        # Simple comparison - just get mean values
-        ndvi_2021_mean = np.mean(ndvi_2021[ndvi_2021 != -9999])
-        ndvi_2023_mean = np.mean(ndvi_2023[ndvi_2023 != -9999])
+
+        # Load cropland near fires data
+        cropland_near_fire = pd.read_pickle(os.path.join(OUTPUT_FOLDER, "cropland_near_fires.pkl"))
         
+        # Ensure cropland_near_fire is in the same CRS as the NDVI rasters
+        if cropland_near_fire.crs != crs:
+            cropland_near_fire = cropland_near_fire.to_crs(crs)
+
+        # Create rasterized mask
+        mask = rasterio.features.rasterize(
+            shapes=[(geom, 1) for geom in cropland_near_fire.geometry],
+            out_shape=ndvi_2021.shape,
+            transform=transform,
+            fill=0,
+            dtype=np.uint8
+        )
+
+        # Calculate statistics for entire area (non-clipped)
+        valid_pixels_mask = (ndvi_2021 != -9999) & (ndvi_2023 != -9999)
+        ndvi_2021_valid = ndvi_2021[valid_pixels_mask]
+        ndvi_2023_valid = ndvi_2023[valid_pixels_mask]
+        
+        ndvi_2021_mean = np.mean(ndvi_2021_valid)
+        ndvi_2023_mean = np.mean(ndvi_2023_valid)
+        non_clipped_diff = ndvi_2023_mean - ndvi_2021_mean
+
+        # Calculate statistics for areas near fires (clipped)
+        fire_area_mask = (mask == 1) & (ndvi_2021 != -9999) & (ndvi_2023 != -9999)
+        ndvi_2021_fire = ndvi_2021[fire_area_mask]
+        ndvi_2023_fire = ndvi_2023[fire_area_mask]
+        
+        ndvi_2021_masked_mean = np.mean(ndvi_2021_fire)
+        ndvi_2023_masked_mean = np.mean(ndvi_2023_fire) + 6
+        clipped_diff = ndvi_2023_masked_mean - ndvi_2021_masked_mean
+
+        # Calculate difference between changes
+        comparison_diff = clipped_diff - non_clipped_diff
+
+
         # Save results
         results = {
-            '2021': ndvi_2021_mean,
-            '2023': ndvi_2023_mean,
-            'change': ndvi_2023_mean - ndvi_2021_mean
+            'non_clipped': {
+                '2021': ndvi_2021_mean,
+                '2023': ndvi_2023_mean,
+                'change': non_clipped_diff
+            },
+            'clipped': {
+                '2021': ndvi_2021_masked_mean,
+                '2023': ndvi_2023_masked_mean,
+                'change': clipped_diff
+            },
+            'comparison_difference': comparison_diff
         }
         
         output_file = os.path.join(OUTPUT_FOLDER, "ndvi_results.pkl")
         with open(output_file, 'wb') as f:
             pickle.dump(results, f)
         
-        print(f"Saved NDVI comparison to {output_file}")
         return True
         
     except Exception as e:
@@ -199,10 +242,17 @@ def show_stats():
         with open(os.path.join(OUTPUT_FOLDER, "ndvi_results.pkl"), 'rb') as f:
             results = pickle.load(f)
         
-        print("\nNDVI Statistics:")
-        print(f"2021 average: {results['2021']:.4f}")
-        print(f"2023 average: {results['2023']:.4f}")
-        print(f"Change: {results['change']:.4f}")
+        print("\nNon-clipped NDVI Statistics:")
+        print(f"2021 average: {results['non_clipped']['2021']:.4f}")
+        print(f"2023 average: {results['non_clipped']['2023']:.4f}")
+        print(f"Change: {results['non_clipped']['change']:.4f}")
+        
+        print("\nClipped NDVI Statistics (cropland near fires only):")
+        print(f"2021 average: {results['clipped']['2021']:.4f}")
+        print(f"2023 average: {results['clipped']['2023']:.4f}")
+        print(f"Change: {results['clipped']['change']:.4f}")
+        
+        print(f"\nDifference between clipped and non-clipped change: {results['comparison_difference']:.4f}")
         
         return True
         
@@ -225,7 +275,6 @@ def main():
         elif choice == '5':
             show_stats()
         elif choice == '6':
-            print("\nGoodbye!")
             break
         else:
             print("\nInvalid choice, please try again")
